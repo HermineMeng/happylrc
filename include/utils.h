@@ -103,6 +103,7 @@ typedef struct {
   Encode_Type encode_type;
   bool partial_decoding;
   bool multi_clusters_involved;
+  bool single_clusters_involved;
   std::vector<std::pair<std::pair<std::string, int>, int>>
       inner_cluster_help_blocks_info;
   std::vector<int> live_blocks_index;

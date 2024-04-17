@@ -33,6 +33,7 @@ set(SHARED_SOURCES
     src/utils.cpp
     src/erasure_code.cpp
     src/tinyxml2.cpp
+
 )
 
 add_executable(run_client

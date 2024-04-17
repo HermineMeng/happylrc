@@ -35,7 +35,15 @@ private:
   void init_cluster_info();
   void init_proxy_info();
   void do_repair(unsigned int stripe_id, std::vector<int> failed_block_indexes);
+  void do_repair_CACHED(unsigned int stripe_id, std::vector<int> failed_block_indexes);
   void generate_repair_plan(
+      unsigned int stripe_id, std::vector<int> &failed_block_indexes,
+      std::vector<std::vector<std::pair<std::pair<std::string, int>, int>>>
+          &blocks_to_read_in_each_cluster,
+      std::vector<unsigned int> &repair_span_cluster,
+      std::vector<std::pair<unsigned int, int>>
+          &new_locations_with_block_index);
+  void generate_repair_plan_CACHED(
       unsigned int stripe_id, std::vector<int> &failed_block_indexes,
       std::vector<std::vector<std::pair<std::pair<std::string, int>, int>>>
           &blocks_to_read_in_each_cluster,

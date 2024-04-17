@@ -14,13 +14,19 @@ public:
   // rpc调用
   void start_encode_and_store_object(placement_info placement);
   void decode_and_transfer_data(placement_info placement);
+  void decode_and_transfer_data_concurrence(placement_info placement);
   void main_repair(main_repair_plan repair_plan);
   void help_repair(help_repair_plan repair_plan);
+  void cache_repair(main_repair_plan repair_plan);
 
 private:
   void write_to_datanode(const char *key, size_t key_len, const char *value,
                          size_t value_len, const char *ip, int port);
+  void write_to_cachenode(const char *key, size_t key_len, const char *value,
+                         size_t value_len, const char *ip, int port);
   void read_from_datanode(const char *key, size_t key_len, char *value,
+                          size_t value_len, const char *ip, int port);
+  void read_from_cachenode(const char *key, size_t key_len, char *value,
                           size_t value_len, const char *ip, int port);
 
   std::unique_ptr<coro_rpc::coro_rpc_server> rpc_server_{nullptr};

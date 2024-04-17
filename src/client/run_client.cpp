@@ -5,6 +5,8 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <unistd.h>
+
 
 int main(int argc, char **argv) {
   std::vector<std::string> args;
@@ -60,7 +62,7 @@ int main(int argc, char **argv) {
 
   std::unordered_map<std::string, std::string> key_value;
 
-  int num_of_kv_pairs = 20;
+  int num_of_kv_pairs = 100;
   generate_unique_random_strings(5, value_length, num_of_kv_pairs, key_value);
 
   for (auto &kv : key_value) {
@@ -68,16 +70,26 @@ int main(int argc, char **argv) {
     client.set(kv.first, kv.second);
   }
 
+  /*
   // datanode的数量, 每个节点都修1次
   unsigned int num_of_nodes = 40;
   for (unsigned int i = 0; i < num_of_nodes; i++) {
+    
     std::cout << "repair node " << i << std::endl;
     client.repair({i});
   }
+  */
+  
+  //sleep(5);
 
   for (auto &kv : key_value) {
+    std::cout << "get kv: " << kv.first << std::endl;
     auto stored_value = client.get(kv.first);
     my_assert(stored_value == kv.second);
+    //std::cout << stored_value << std::endl;
+    //std::cout << stored_value.size() << std::endl;;
+    //std::cout << kv.second << std::endl;
+    //std::cout << kv.second.size() << std::endl;
   }
 
   return 0;

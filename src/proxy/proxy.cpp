@@ -13,8 +13,10 @@ Proxy::Proxy(std::string ip, int port)
   rpc_server_ = std::make_unique<coro_rpc::coro_rpc_server>(1, port_for_rpc_);
   rpc_server_->register_handler<&Proxy::start_encode_and_store_object>(this);
   rpc_server_->register_handler<&Proxy::decode_and_transfer_data>(this);
+  rpc_server_->register_handler<&Proxy::decode_and_transfer_data_concurrence>(this);
   rpc_server_->register_handler<&Proxy::main_repair>(this);
   rpc_server_->register_handler<&Proxy::help_repair>(this);
+  rpc_server_->register_handler<&Proxy::cache_repair>(this);
 }
 
 Proxy::~Proxy() {
@@ -76,6 +78,7 @@ void Proxy::start_encode_and_store_object(placement_info placement) {
       int num_of_datanodes_involved =
           placement.k + placement.g + placement.real_l;
       int num_of_blocks_each_stripe = num_of_datanodes_involved;
+      int g = placement.g;
       std::vector<std::thread> writers;
       int k = placement.k;
       for (int j = 0; j < num_of_datanodes_involved; j++) {
@@ -86,9 +89,32 @@ void Proxy::start_encode_and_store_object(placement_info placement) {
         std::pair<std::string, int> ip_and_port_of_datanode =
             placement.datanode_ip_port[i * num_of_blocks_each_stripe + j];
         writers.push_back(
-            std::thread([this, j, k, block_id, data, coding, cur_block_size,
+            std::thread([this, j, k, g, block_id, data, coding, cur_block_size,
                          ip_and_port_of_datanode]() {
+              /*
               if (j < k) {
+                write_to_datanode(block_id.c_str(), block_id.size(), data[j],
+                                  cur_block_size,
+                                  ip_and_port_of_datanode.first.c_str(),
+                                  ip_and_port_of_datanode.second);
+              } else if( j>=k && j < k + g - 1){
+                write_to_datanode(block_id.c_str(), block_id.size(),
+                                  coding[j - k], cur_block_size,
+                                  ip_and_port_of_datanode.first.c_str(),
+                                  ip_and_port_of_datanode.second);
+              } else{
+                write_to_datanode(block_id.c_str(), block_id.size(), 
+                                  coding[j - k], cur_block_size,
+                                  ip_and_port_of_datanode.first.c_str(),
+                                  ip_and_port_of_datanode.second);
+                write_to_cachenode(block_id.c_str(), block_id.size(), 
+                                  coding[j - k], cur_block_size,
+                                  ip_and_port_of_datanode.first.c_str(),
+                                  ip_and_port_of_datanode.second);
+                
+                 
+              }*/
+               if (j < k) {
                 write_to_datanode(block_id.c_str(), block_id.size(), data[j],
                                   cur_block_size,
                                   ip_and_port_of_datanode.first.c_str(),
@@ -99,6 +125,8 @@ void Proxy::start_encode_and_store_object(placement_info placement) {
                                   ip_and_port_of_datanode.first.c_str(),
                                   ip_and_port_of_datanode.second);
               }
+              
+
             }));
       }
       for (auto j = 0; j < writers.size(); j++) {
@@ -120,7 +148,199 @@ void Proxy::start_encode_and_store_object(placement_info placement) {
   new_thread.detach();
 }
 
+void Proxy::write_to_datanode(const char *key, size_t key_len,
+                              const char *value, size_t value_len,
+                              const char *ip, int port) {
+  asio::ip::tcp::socket peer(io_context_);
+  asio::ip::tcp::endpoint endpoint(asio::ip::make_address(ip), port);
+  peer.connect(endpoint);
+
+  int flag = 2;
+  std::vector<unsigned char> flag_buf = int_to_bytes(flag);
+  asio::write(peer, asio::buffer(flag_buf, flag_buf.size()));
+
+  std::vector<unsigned char> key_size_buf = int_to_bytes(key_len);
+  asio::write(peer, asio::buffer(key_size_buf, key_size_buf.size()));
+
+  std::vector<unsigned char> value_size_buf = int_to_bytes(value_len);
+  asio::write(peer, asio::buffer(value_size_buf, value_size_buf.size()));
+
+  asio::write(peer, asio::buffer(key, key_len));
+  asio::write(peer, asio::buffer(value, value_len));
+
+  std::vector<char> finish(1);
+  asio::read(peer, asio::buffer(finish, finish.size()));
+
+  asio::error_code ignore_ec;
+  peer.shutdown(asio::ip::tcp::socket::shutdown_both, ignore_ec);
+  peer.close(ignore_ec);
+}
+
+void Proxy::read_from_datanode(const char *key, size_t key_len, char *value,
+                               size_t value_len, const char *ip, int port) {
+  asio::ip::tcp::socket peer(io_context_);
+  asio::ip::tcp::endpoint endpoint(asio::ip::make_address(ip), port);
+  peer.connect(endpoint);
+
+  int flag = 3;
+  std::vector<unsigned char> flag_buf = int_to_bytes(flag);
+  asio::write(peer, asio::buffer(flag_buf, flag_buf.size()));
+
+  std::vector<unsigned char> key_size_buf = int_to_bytes(key_len);
+  asio::write(peer, asio::buffer(key_size_buf, key_size_buf.size()));
+
+  asio::write(peer, asio::buffer(key, key_len));
+
+  asio::read(peer, asio::buffer(value, value_len));
+
+  asio::error_code ignore_ec;
+  peer.shutdown(asio::ip::tcp::socket::shutdown_both, ignore_ec);
+  peer.close(ignore_ec);
+}
+
+
+/////////////并发读取
+void Proxy::decode_and_transfer_data_concurrence(placement_info placement){
+  auto decode_and_transfer = [this, placement](){
+    std::string object_value;
+    for (auto i = 0; i < placement.stripe_ids.size(); i++) {
+      unsigned int stripe_id = placement.stripe_ids[i];
+      auto blocks_ptr =
+          std::make_shared<std::vector<std::vector<char>>>();
+      auto blocks_idx_ptr =
+          std::make_shared<std::vector<int>>();
+      auto myLock_ptr = std::make_shared<std::mutex>();
+      auto cv_ptr = std::make_shared<std::condition_variable>();
+      int expect_block_number = placement.k + placement.real_l -1;
+      int all_expect_blocks = placement.k + placement.g +placement.real_l ;
+
+      size_t cur_block_size;
+      if ((i == placement.stripe_ids.size() - 1) &&
+          placement.tail_block_size != -1) {
+        cur_block_size = placement.tail_block_size;
+      } else {
+        cur_block_size = placement.block_size;
+      }
+      my_assert(cur_block_size > 0);
+
+      std::vector<char *> data_v(placement.k);
+      std::vector<char *> coding_v(all_expect_blocks - placement.k);
+      char **data = (char **)data_v.data();
+      char **coding = (char **)coding_v.data();
+      int k = placement.k;
+      int g = placement.g;
+      int real_l = placement.real_l;
+
+      auto getFromNode=[this, k, blocks_ptr, blocks_idx_ptr, myLock_ptr, cv_ptr]
+      (int expect_block_number, int stripe_id, int block_idx, int cur_block_size, std::string ip, int port )
+      {
+        std::string block_id = std::to_string(stripe_id * 1000 + block_idx);
+        std::vector<char> block(cur_block_size);
+
+        read_from_datanode(block_id.c_str(), block_id.size(), 
+                           block.data(), cur_block_size, ip.c_str(), port);
+        ///////////////////////////////////////////
+        std::cout<<"read success"<<std::endl;
+
+        myLock_ptr->lock();
+
+        if (!check_received_block(k, expect_block_number, blocks_idx_ptr, blocks_ptr->size())){
+          blocks_ptr->push_back(block);
+          blocks_idx_ptr->push_back(block_idx);
+          if (check_received_block(k, expect_block_number,blocks_idx_ptr, blocks_ptr->size())){
+            cv_ptr->notify_all();
+          }
+          // 检查已有的块是否满足要求
+        }
+        myLock_ptr->unlock();
+      };
+
+      ////////////////////////////////////////////////////////////////////////////////////
+      std::vector<std::vector<char>> space_for_data_blocks(k, std::vector<char>(cur_block_size));
+      std::vector<std::vector<char>> space_for_parity_blocks(all_expect_blocks - k , std::vector<char>(cur_block_size));
+      for (int j = 0; j < k; j++) {
+        data[j] = space_for_data_blocks[j].data();
+      }
+      for (int j = 0; j < all_expect_blocks - k; j++) {
+        coding[j] = space_for_parity_blocks[j].data();
+      }
+
+      /////////////////////////////////////////////////////////////////////////////////////
+      int num_of_blocks_each_stripe =
+          placement.k + placement.g + placement.real_l;
+      std::vector<std::thread> readers;
+      for (int j = 0; j < all_expect_blocks; j++) {
+        std::pair<std::string, int> ip_and_port_of_datanode =
+            placement.datanode_ip_port[i * num_of_blocks_each_stripe + j];
+        readers.push_back(
+            std::thread(getFromNode, expect_block_number, stripe_id, j, cur_block_size, ip_and_port_of_datanode.first, ip_and_port_of_datanode.second));
+      }
+      for (auto j = 0; j < all_expect_blocks; j++) {
+        readers[j].detach();
+      }
+
+      std::unique_lock<std::mutex> lck(*myLock_ptr);
+
+      while(!check_received_block(k, expect_block_number, blocks_idx_ptr, blocks_ptr->size())){
+        cv_ptr->wait(lck);
+      }
+      for(int j = 0; j < int(blocks_idx_ptr->size()); j++){
+        int idx = (*blocks_idx_ptr)[j];
+        if (idx < k){
+          memcpy(data[idx], (*blocks_ptr)[j].data(), cur_block_size);
+        }else{
+          memcpy(coding[idx - k], (*blocks_ptr)[j].data(), cur_block_size);
+        }
+
+      }
+
+      auto erasures = std::make_shared<std::vector<int>>();
+      for (int j = 0; j < all_expect_blocks; j++){
+        if (std::find(blocks_idx_ptr->begin(), blocks_idx_ptr->end(), j) == blocks_idx_ptr->end()){
+          erasures->push_back(j);
+        }
+      }
+      erasures->push_back(-1);
+
+      /*bool ret = decode(k, g, real_l, data, coding, erasures, cur_block_size);
+      if(!ret){
+        std::cout << "cannot decode!" << std::endl;
+      }*/
+      if (!decode(k, g, real_l, data, coding, erasures, cur_block_size)){
+        std::cout << "cannot decode!" << std::endl;
+      }
+
+      for (int j = 0; j < k; j++){
+        object_value += std::string(data[j], cur_block_size);
+      }
+
+          
+    }
+
+    asio::ip::tcp::socket peer(io_context_);
+    asio::ip::tcp::endpoint endpoint(
+        asio::ip::make_address(placement.client_ip), placement.client_port);
+    peer.connect(endpoint);
+
+    asio::write(peer, asio::buffer(placement.key, placement.key.size()));
+    asio::write(peer, asio::buffer(object_value, object_value.size()));
+
+    asio::error_code ignore_ec;
+    peer.shutdown(asio::ip::tcp::socket::shutdown_both, ignore_ec);
+    peer.close(ignore_ec);
+
+
+  };
+
+
+
+  std::thread new_thread(decode_and_transfer);
+  new_thread.detach();
+}
+
+
 // 非阻塞的,会立即返回
+//拼接k个数据块读取
 void Proxy::decode_and_transfer_data(placement_info placement) {
   auto decode_and_transfer = [this, placement]() {
     std::string object_value;
@@ -191,7 +411,7 @@ void Proxy::decode_and_transfer_data(placement_info placement) {
   new_thread.detach();
 }
 
-void Proxy::write_to_datanode(const char *key, size_t key_len,
+void Proxy::write_to_cachenode(const char *key, size_t key_len,
                               const char *value, size_t value_len,
                               const char *ip, int port) {
   asio::ip::tcp::socket peer(io_context_);
@@ -219,7 +439,7 @@ void Proxy::write_to_datanode(const char *key, size_t key_len,
   peer.close(ignore_ec);
 }
 
-void Proxy::read_from_datanode(const char *key, size_t key_len, char *value,
+void Proxy::read_from_cachenode(const char *key, size_t key_len, char *value,
                                size_t value_len, const char *ip, int port) {
   asio::ip::tcp::socket peer(io_context_);
   asio::ip::tcp::endpoint endpoint(asio::ip::make_address(ip), port);
@@ -239,6 +459,45 @@ void Proxy::read_from_datanode(const char *key, size_t key_len, char *value,
   asio::error_code ignore_ec;
   peer.shutdown(asio::ip::tcp::socket::shutdown_both, ignore_ec);
   peer.close(ignore_ec);
+}
+
+
+///////////////////////////////////////////////////////////
+void Proxy::cache_repair(main_repair_plan repair_plan) {
+  int failed_block_index = repair_plan.failed_blocks_index[0];
+  
+  /*******cache中读取********/
+  //for (auto i = 0; i < repair_plan.inner_cluster_help_blocks_info.size(); i++) {
+    /*std::vector<std::vector<std::pair<std::pair<std::string, int>, int>>>
+      blocks_to_read_in_each_cluster;*/
+    /*repair_plan.inner_cluster_help_blocks_info = blocks_to_read_in_each_cluster[0];*/
+    /*repair_plan.inner_cluster_help_blocks_info：std::vector<std::pair<std::pair<std::string, int>, int>>*/
+    std::string &ip =
+        repair_plan.inner_cluster_help_blocks_info[0].first.first;
+    int port = repair_plan.inner_cluster_help_blocks_info[0].first.second;
+    int block_index = repair_plan.inner_cluster_help_blocks_info[0].second;
+    std::vector<char> block_buf(repair_plan.block_size);
+
+    std::string block_id =
+        std::to_string(repair_plan.stripe_id * 1000 + block_index);
+    
+    read_from_cachenode(block_id.c_str(), block_id.size(), block_buf.data(),
+                         repair_plan.block_size, ip.c_str(), port);
+    
+  //}
+
+  /******写回原出错node(storage node)*******/
+  std::vector<char> repaired_block(repair_plan.block_size);
+  repaired_block = block_buf;
+
+  std::string ip_repair = repair_plan.new_locations[0].first.first;
+  int port_repair = repair_plan.new_locations[0].first.second;
+  std::string key = std::to_string(repair_plan.stripe_id * 1000 +
+                                   repair_plan.failed_blocks_index[0]);
+  write_to_datanode(key.data(), key.size(), repaired_block.data(),
+                    repaired_block.size(), ip_repair.c_str(), port_repair);
+
+
 }
 
 void Proxy::main_repair(main_repair_plan repair_plan) {
